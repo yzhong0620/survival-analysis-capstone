@@ -1,0 +1,558 @@
+---
+title: "Capstone Project"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+library(dplyr)
+library(survival)
+library(ggplot2)
+```
+
+```{r, echo=FALSE}
+# for checking distribution
+CoxSnell = function(cs,status,xlim=NULL,ylim=NULL)
+{
+kmcs = survfit( Surv(jitter(cs,amount=(max(cs)-min(cs))/1000),status) ~ 1 )$surv
+
+plot( log(-log(kmcs)) ~ sort(log(cs)) ,
+      xlab="log(Cox-Snell)", ylab="log(-log(S(Cox-Snell)))", xlim=xlim, ylim=ylim )
+
+abline(0,1,col='red')
+}
+```
+
+[Data Source](https://www.kaggle.com/proselotis/financial-ipo-data)
+
+```{r}
+IPO = read.csv("IPODataFull.csv")
+```
+
+```{r, echo=FALSE}
+# fix typo
+# IPO[IPO$Symbol=="EGL",]%>% select(c("exactDateFounded", "YearFounded"))
+IPO[1040,"YearFounded"]=2011
+# IPO[IPO$Symbol=="EGL",]%>% select(c("exactDateFounded", "YearFounded"))
+```
+
+## Data Cleaning
+
+```{r}
+# default date in month
+defaultDay = "15"
+# default date in year
+defaultDate ="06-30"
+```
+
+```{r,results='hide'}
+# drop na in YearFounded
+IPO = IPO[!is.na(IPO$YearFounded),]
+# look at original datetime format
+# IPO %>% select(c("ipoDate", "YearFounded", "exactDateFounded"))
+```
+
+```{r,results='hide', echo=FALSE}
+# reformat ipoDate into IPODate
+IPO$IPODate = as.Date(IPO$ipoDate,format='%m/%d/%y %H:%M')
+# drop ipoDate
+IPO = subset(IPO, select = -ipoDate)
+# look again
+# IPO %>% select(c("IPODate", "YearFounded", "exactDateFounded"))
+```
+
+```{r, echo=FALSE}
+# reformat exactDateFounded into DateFounded
+DateFounded = c(Sys.Date())
+for (i in 1:nrow(IPO)){
+  rawDate = IPO$exactDateFounded[i]
+  len = nchar(gsub('[^,]', '', rawDate)) +1L
+  if (len==1){
+    mydate = paste0(rawDate,defaultDate)
+    DateFounded = c(DateFounded, as.Date(mydate,format='%Y%m-%d'))
+  } else if (len==2){
+    mydate = paste0(rawDate,defaultDay)
+    DateFounded = c(DateFounded, as.Date(mydate,format='%B,%Y%d'))
+  } else if (len==3){
+    DateFounded = c(DateFounded, as.Date(rawDate,format="%B,%d,%Y"))
+  } else if (len==4){
+    DateFounded = c(DateFounded, as.Date("June,28,1951", format="%B,%d,%Y")) # I looked at this exception
+  }
+}
+IPO$DateFounded = DateFounded[-1]
+# drop exactDateFounded
+IPO = subset(IPO, select = -exactDateFounded)
+```
+
+```{r, echo=FALSE}
+# create DaysToIPO, IPOYear and YearsToIPO
+IPO$DaysToIPO = as.numeric(difftime(IPO$IPODate, IPO$DateFounded, units = "days"))
+IPO$IPOYear = format(IPO$IPODate,"%Y")
+IPO$YearsToIPO = as.numeric(IPO$IPOYear) - as.numeric(IPO$YearFounded)
+# Filter out negative DaysToIPO
+IPO = IPO %>% filter(DaysToIPO >= 0)
+# look again
+# IPO %>% select(c("IPOYear", "IPODate", "YearFounded", "DateFounded", "DaysToIPO", "YearsToIPO"))
+```
+
+```{r}
+# subset of the original data set without TVC or anything after Fiscal_year
+IPO_sub <- select (IPO, DaysToIPO, YearsToIPO, LastSale, Sector, Industry, CEOTakeOver, CEOAge, CEOGender, PresidentAge, Revenue, netIncome, lastFiscalYearGrowth, employees) %>% filter(Sector != "")
+```
+
+```{r, echo=FALSE}
+# make numeric Revenue
+for (i in 1:nrow(IPO_sub)){
+  x=gsub("\\$", "", IPO_sub$Revenue[i])
+  if (endsWith(x,"B")){
+    x<-as.numeric(gsub("B", "", x))
+    x=x*1000000000
+  }
+  else if (endsWith(x,"M")){
+    x<-as.numeric(gsub("M", "", x))
+    x=x*1000000
+  }
+  IPO_sub$Revenue[i]<-x
+}
+
+# make numeric netIncome
+for (i in 1:nrow(IPO_sub)){
+  x=gsub("\\$", "", IPO_sub$netIncome[i])
+  if (endsWith(x,"B")){
+    x<-as.numeric(gsub("B", "", x))
+    x=x*1000000000
+  }
+  else if (endsWith(x,"M")){
+    x<-as.numeric(gsub("M", "", x))
+    x=x*1000000
+  }
+  IPO_sub$netIncome[i]<-x
+}
+```
+
+```{r,message=FALSE, warning=FALSE, echo=FALSE}
+IPO_sub$Revenue<-as.numeric(IPO_sub$Revenue)
+IPO_sub$netIncome<-as.numeric(IPO_sub$netIncome)
+IPO_sub$lastFiscalYearGrowth<-as.numeric(IPO_sub$lastFiscalYearGrowth)
+IPO_sub$employees<-as.numeric(IPO_sub$employees)
+IPO_sub$Sector<-as.factor((IPO_sub$Sector))
+IPO_sub$Industry<-as.factor((IPO_sub$Industry))
+IPO_sub$CEOGender<- as.factor(IPO_sub$CEOGender)
+```
+
+```{r}
+summary(IPO_sub)
+```
+
+
+## Exploratory Analysis 
+
+```{r, message=FALSE, fig.height=7, echo=FALSE, eval=FALSE}
+data<-select(IPO_sub,-Sector,-Industry,-CEOGender)
+library(pcalg)
+suff_stat <- list(C = cor(data), n = nrow(data))
+pc_data <- pc(suff_stat, indepTest = gaussCItest, labels = colnames(data), alpha = 0.05, skel.method = "stable.fast")
+#plot(pc_data, main = "pcalg graph",  cex.main=1.5, cex.sub=2.5)
+```
+
+```{r, warning=FALSE, message=FALSE, fig.width=6, fig.height=4}
+ggplot(data=IPO_sub,aes(x=log(LastSale),y=DaysToIPO))+geom_point(alpha=0.3, col ="blue")+geom_smooth(se=FALSE, show.legend = FALSE,col="black")+theme_minimal()+ylim(0,40000)+theme(axis.title.x = element_text(size=14),axis.title.y = element_text(size=14))
+```
+
+```{r, warning=FALSE, message=FALSE, fig.width=6, fig.height=4}
+ggplot(data=IPO_sub,aes(x=log(employees),y=DaysToIPO))+geom_point(alpha=0.3, col ="blue")+geom_smooth(se=FALSE, show.legend = FALSE,col="black")+theme_minimal()+ylim(0,40000)+theme(axis.title.x = element_text(size=14),axis.title.y = element_text(size=14))+xlab("log(Employees)")
+```
+
+```{r, warning=FALSE, message=FALSE, fig.width=6, fig.height=4}
+ggplot(data=IPO_sub,aes(x=log(Revenue),y=DaysToIPO))+geom_point(alpha=0.3, col ="blue")+geom_smooth(se=FALSE, show.legend = FALSE,col="black")+theme_minimal()+ylim(0,40000)+theme(axis.title.x = element_text(size=14),axis.title.y = element_text(size=14))
+```
+
+```{r fig.width=9, fig.height=6,warning=FALSE}
+ggplot(IPO_sub,aes(x=Sector,y=DaysToIPO,fill=Sector)) +
+  geom_boxplot(show.legend=FALSE) + 
+  theme_minimal()+
+  ylim(0,15000)+
+  theme(axis.text.x = element_text(angle = 90, size=12),axis.title.x = element_text(size=16),axis.title.y = element_text(size=16))
+```
+
+
+## Modeling with DaysToIPO 
+
+### Check PH assumption 
+
+```{r}
+m3 = coxph( Surv( DaysToIPO) ~ Revenue , data=IPO_sub )
+plot( cox.zph(m3) )
+
+m4 = coxph( Surv( DaysToIPO) ~ netIncome , data=IPO_sub )
+plot( cox.zph(m4) )
+
+m9 = coxph( Surv( DaysToIPO) ~ LastSale , data=IPO_sub )
+plot( cox.zph(m9) )
+```
+
+```{r}
+# only m3, m4, m9 (Revenue, netIncome, LastSale satisfy the PH assumption)
+
+cox.zph(m3) ## >  0.05
+cox.zph(m4) ## >  0.05
+cox.zph(m9) ## >  0.05
+```
+
+
+```{r}
+coxph(Surv(DaysToIPO)~LastSale+netIncome+strata(Sector)+strata(CEOGender),data=IPO_sub)
+```
+
+
+```{r}
+coxph(Surv(DaysToIPO)~LastSale,data=IPO_sub) # significant
+```
+
+
+```{r}
+mod1=survreg(Surv(DaysToIPO+0.0001)~LastSale+employees+CEOAge,data=IPO_sub,dist="weibull")
+summary(mod1)
+```
+
+```{r}
+mod2 = survreg(Surv(DaysToIPO+0.0001)~LastSale+employees+CEOAge+factor(Sector),data=IPO_sub,dist="weibull")
+summary(mod2)
+```
+
+```{r}
+summary(survreg(Surv(DaysToIPO)~LastSale+employees+CEOAge+factor(Sector),data=IPO_sub,dist="gaussian")) # LastSale not significant
+```
+
+```{r, echo=FALSE}
+# IPO_sub4 is a copy of IPO_sub, but with missing values in employees and CEOAge imputed with mean values 
+# used for checking distribution appropriateness
+IPO_sub4 = cbind(IPO_sub)
+IPO_sub4$employees[is.na(IPO_sub4$employees)] = mean(IPO_sub4$employees, na.rm = TRUE)
+IPO_sub4$CEOAge[is.na(IPO_sub4$CEOAge)] = mean(IPO_sub4$CEOAge, na.rm = TRUE)
+```
+
+```{r, echo=FALSE}
+# normal distribution is not appropriate
+CS = -log( 1 - pnorm( IPO_sub4$DaysToIPO , 
+                      -4.09e+03+
+                        3.91*IPO_sub4$LastSale+
+                        4.39e-02*IPO_sub4$employees+
+                        9.52e+01*IPO_sub4$CEOAge+
+                        5.02e+03*(IPO_sub4$Sector=="Basic Industries")+
+                        6.94e+03*(IPO_sub4$Sector=="Capital Goods")+
+                        3.59e+03*(IPO_sub4$Sector=="Consumer Durables")+
+                        1.10e+04*(IPO_sub$Sector=="Consumer Non-Durables")+
+                        
+                        4.18e+03*(IPO_sub4$Sector=="Consumer Services")+
+                        4.49e+03*(IPO_sub4$Sector=="Energy")+
+                        4.98e+03*(IPO_sub4$Sector=="Finance")+
+                        2.22e+03*(IPO_sub$Sector=="Health Care")+
+                        
+                        4.62e+03*(IPO_sub4$Sector=="Miscellaneous")+
+                        7.32e+03*(IPO_sub4$Sector=="Public Utilities")+
+                        2.46e+03*(IPO_sub4$Sector=="Technology")+
+                        5.85e+03*(IPO_sub$Sector=="Transportation")
+                      , 9644) ) 
+CoxSnell( CS , rep(1,nrow(IPO_sub4)) )
+```
+
+```{r}
+summary(survreg(Surv(DaysToIPO+0.0001)~LastSale+employees+CEOAge+factor(Sector),data=IPO_sub,dist="exponential")) # significant
+```
+
+```{r, echo=FALSE}
+# exponential distribution is not appropriate
+CS = -log( 1 - pexp( IPO_sub4$DaysToIPO , 
+                     1/exp(5.93+
+                             2.17e-03*IPO_sub4$LastSale+
+                            9.53e-06*IPO_sub4$employees+
+                            1.97e-02*IPO_sub4$CEOAge+
+                             
+                            1.56*(IPO_sub4$Sector=="Basic Industries")+
+                            1.80*(IPO_sub4$Sector=="Capital Goods")+
+                            1.34*(IPO_sub4$Sector=="Consumer Durables")+
+                            2.15*(IPO_sub$Sector=="Consumer Non-Durables")+
+                            
+                            1.51*(IPO_sub4$Sector=="Consumer Services")+
+                            1.54*(IPO_sub4$Sector=="Energy")+
+                            1.55*(IPO_sub4$Sector=="Finance")+
+                            1.06*(IPO_sub$Sector=="Health Care")+
+                            
+                            1.54*(IPO_sub4$Sector=="Miscellaneous")+
+                            1.94*(IPO_sub4$Sector=="Public Utilities")+
+                            1.13*(IPO_sub4$Sector=="Technology")+
+                            1.61*(IPO_sub$Sector=="Transportation")
+                     )) ) 
+CoxSnell( CS , rep(1,nrow(IPO_sub4)) )
+```
+
+```{r}
+summary(survreg(Surv(DaysToIPO+0.0001)~LastSale+employees+CEOAge+factor(Sector),data=IPO_sub,dist="weibull")) # significant
+```
+
+```{r, echo=FALSE}
+# weibull distribution is kinda appropriate but not really
+CS = -log( 1 - pweibull( IPO_sub4$DaysToIPO , 
+                         shape = 1/1.4,  
+                         scale = exp(7.38+
+                                     1.79e-03*IPO_sub4$LastSale+
+                                    8.11e-06*IPO_sub4$employees+
+                                    1.69e-02*IPO_sub4$CEOAge+
+                                     
+                                    3.28e-01*(IPO_sub4$Sector=="Capital Goods")+
+                                    -1.75e-01*(IPO_sub4$Sector=="Consumer Durables")+
+                                    6.68e-01*(IPO_sub$Sector=="Consumer Non-Durables")+
+                                    
+                                    -1.38e-02*(IPO_sub4$Sector=="Consumer Services")+
+                                    -7.15e-02*(IPO_sub4$Sector=="Energy")+
+                                    1.17e-02*(IPO_sub4$Sector=="Finance")+
+                                    -3.44e-01*(IPO_sub$Sector=="Health Care")+
+                                    
+                                     6.94e-02*(IPO_sub4$Sector=="Miscellaneous")+
+                                    3.69e-01*(IPO_sub4$Sector=="Public Utilities")+
+                                    -2.61e-01*(IPO_sub4$Sector=="Technology")+
+                                    7.81e-02*(IPO_sub$Sector=="Transportation")
+                                     )) ) 
+CoxSnell( CS , rep(1,nrow(IPO_sub4)),xlim=c(-4,2) )
+```
+
+
+```{r}
+summary(survreg(Surv(DaysToIPO+0.0001)~LastSale+employees+CEOAge+factor(Sector),data=IPO_sub,dist="lognormal")) # LastSale not significant
+```
+
+```{r, echo=FALSE}
+# lognormal distribution is not appropriate 
+CS = -log( 1 - plnorm( IPO_sub4$DaysToIPO , 
+                         4.66+
+                         1.43e-03*IPO_sub4$LastSale+
+                          3.06e-06*IPO_sub4$employees+
+                          1.30e-02*IPO_sub4$CEOAge+
+                                     
+                          1.98*(IPO_sub4$Sector=="Basic Industries")+
+                          2.37*(IPO_sub4$Sector=="Capital Goods")+
+                          1.86*(IPO_sub4$Sector=="Consumer Durables")+
+                          2.78*(IPO_sub$Sector=="Consumer Non-Durables")+
+                                    
+                          2.03*(IPO_sub4$Sector=="Consumer Services")+
+                          1.80*(IPO_sub4$Sector=="Energy")+
+                          1.85*(IPO_sub4$Sector=="Finance")+
+                          2.23*(IPO_sub$Sector=="Health Care")+
+                                    
+                          2.35*(IPO_sub4$Sector=="Miscellaneous")+
+                          2.13*(IPO_sub4$Sector=="Public Utilities")+
+                          2.30*(IPO_sub4$Sector=="Technology")+
+                          2.12*(IPO_sub$Sector=="Transportation")
+                       ,  
+                         1.86) ) 
+CoxSnell( CS , rep(1,nrow(IPO_sub4)) )
+```
+
+
+
+### Model comparison
+
+#### is including Sector worthwhile? Yes
+
+```{r}
+l1=summary(mod1)$loglik[2]
+l2=summary(mod2)$loglik[2]
+1 - pchisq(2*(l2-l1),11) # = 0
+```
+
+#### weibull vs normal (weibull) 
+
+agrees with CS plot
+
+```{r}
+loglik_weibull = -20075
+loglik_normal = -22414.6
+loglik_exponential = -20307.6
+loglik_lognormal = -20307.4 
+
+# AIC - not nested 
+2*(15-(loglik_weibull))
+2*(15-(loglik_normal))
+```
+
+#### weibull vs exponential (weibull)
+
+agrees with CS plot
+
+```{r}
+# LRT - nested
+ts=2*(loglik_weibull-(loglik_exponential))
+1-pchisq(ts,1)
+
+# AIC
+2*(15-(loglik_weibull))
+2*(14-(loglik_exponential))
+```
+
+#### weibull vs log-normal (weibull)
+
+agrees with CS plot
+
+```{r}
+# AIC - not nested 
+2*(15-(loglik_weibull))
+2*(15-(loglik_lognormal))
+```
+
+#### normal vs exponential (exponential)
+
+```{r}
+# AIC - not nested
+2*(15-(loglik_normal))
+2*(15-(loglik_exponential))
+```
+
+#### normal vs log-normal (log-normal)
+
+```{r}
+# AIC - not nested
+2*(15-(loglik_normal))
+2*(15-(loglik_lognormal))
+```
+
+#### exponential vs log-normal (log-normal)
+
+```{r}
+# AIC - not nested 
+2*(14-(loglik_exponential))
+2*(15-(loglik_lognormal))
+```
+
+## Modeling with YearsToIPO 
+
+```{r echo=FALSE, eval=FALSE}
+ym1 = coxph( Surv( YearsToIPO) ~ DaysBetterThanSP , data=IPO_sub )
+plot( cox.zph(ym1) )
+
+ym2 = coxph( Surv( YearsToIPO) ~ daysProfit , data=IPO_sub )
+plot( cox.zph(ym2) )
+
+ym3 = coxph( Surv( YearsToIPO) ~ Revenue , data=IPO_sub )
+plot( cox.zph(ym3) )
+
+ym4 = coxph( Surv( YearsToIPO) ~ netIncome , data=IPO_sub )
+plot( cox.zph(ym4) )
+
+ym5 = coxph( Surv( YearsToIPO) ~ CEOAge , data=IPO_sub )
+plot( cox.zph(ym5) )
+
+ym6 = coxph( Surv( YearsToIPO) ~ PresidentAge , data=IPO_sub )
+plot( cox.zph(ym6) )
+
+ym7 = coxph( Surv( YearsToIPO) ~ lastFiscalYearGrowth , data=IPO_sub )
+plot( cox.zph(ym7) )
+
+ym8 = coxph( Surv( YearsToIPO) ~ employees , data=IPO_sub )
+plot( cox.zph(ym8) )
+
+ym9 = coxph( Surv( YearsToIPO) ~ LastSale , data=IPO_sub )
+plot( cox.zph(ym9) )
+
+ym10 = coxph( Surv( YearsToIPO) ~ MarketCap , data=IPO_sub )
+plot( cox.zph(ym10) )
+```
+
+```{r echo=FALSE, eval=FALSE}
+cox.zph(ym1) ## <  0.05
+cox.zph(ym2) ## >  0.05
+cox.zph(ym3) ## >  0.05
+cox.zph(ym4) ## >  0.05
+cox.zph(ym5) ## <  0.05
+cox.zph(ym6) ## <  0.05
+cox.zph(ym7) ## <  0.05
+cox.zph(ym8) ## <  0.05
+cox.zph(ym9) ## >  0.05
+cox.zph(ym10) ## <  0.05
+```
+
+### Some models
+
+```{r echo=FALSE, eval=FALSE}
+ymd1=coxph(Surv(YearsToIPO)~daysProfit+Revenue+netIncome+LastSale,data=IPO_sub)
+summary(ymd1)
+```
+
+```{r echo=FALSE, eval=FALSE}
+ymd2=survreg(Surv(YearsToIPO)~daysProfit+Revenue+netIncome+LastSale,data=IPO_sub,dist="gaussian")
+summary(ymd2)
+```
+
+```{r echo=FALSE, eval=FALSE}
+ymd3=survreg(Surv(YearsToIPO+0.0001)~daysProfit+Revenue+netIncome+LastSale,data=IPO_sub,dist="exponential")
+summary(ymd3)
+```
+
+```{r echo=FALSE, eval=FALSE}
+ymd4=survreg(Surv(YearsToIPO+0.0001)~daysProfit+Revenue+netIncome+LastSale,data=IPO_sub,dist="weibull")
+summary(ymd4)
+```
+
+```{r echo=FALSE, eval=FALSE}
+ymd5=survreg(Surv(YearsToIPO+0.0001)~daysProfit+Revenue+netIncome+LastSale,data=IPO_sub,dist="lognormal")
+summary(ymd5)
+```
+
+### Model comparison
+
+#### weibull vs normal (weibull)
+
+```{r echo=FALSE, eval=FALSE}
+# AIC - not nested 
+2*(6-(-7243.1))
+2*(6-(-11323.5))
+```
+
+#### weibull vs exponential (weibull)
+
+```{r echo=FALSE, eval=FALSE}
+# LRT
+ts=2*(-7243.1-(-8984.5))
+1-pchisq(ts,1)
+
+# AIC
+2*(6-(-7243.1))
+2*(5-(-8984.5))
+```
+
+#### weibull vs log-normal (weibull)
+
+```{r echo=FALSE, eval=FALSE}
+# AIC - not nested
+2*(6-(-7243.1))
+2*(6-(-7952.4))
+```
+
+#### normal vs exponential (exponential)
+
+```{r echo=FALSE, eval=FALSE}
+# AIC - not nested
+2*(6-(-11323.5))
+2*(5-(-8984.5))
+```
+
+#### normal vs log-normal (log-normal)
+
+```{r echo=FALSE, eval=FALSE}
+# AIC - not nested 
+2*(6-(-11323.5))
+2*(6-(-7952.4))
+```
+
+#### exponential vs log-normal (log-normal)
+
+```{r echo=FALSE, eval=FALSE}
+# AIC - not nested 
+2*(5-(-8984.5))
+2*(6-(-7952.4))
+```
+
+
+
+
